@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+from typing import Final
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -37,8 +38,34 @@ KEY_UNIT = "Unit"
 KEY_CAPABILITIES = "capabilities"
 KEY_IAQ = "iaq"
 KEY_TEMPERATURE = "temperature"
+KEY_MB_MODEL: Final = "mb_model"
+LIFE_SENSOR_KEY: Final = "life"
 
 logger = logging.getLogger(__name__)
+
+# --- DETECT SERIES MODEL LOGIC ---
+# Define the set of ALL DETECT series mb_models (46 and 48) for the OR check
+MB_MODELS_DETECT_SERIES: Final = {48, 46}
+
+# Keys to skip for DETECT models (they return 0 or unhelpful data)
+_SKIP_SIMPLE_SENSOR_KEYS: Final = {"batt_volt", "battery_voltage"}
+
+# Unit/Name configuration for the 'life' sensor based on mb_model
+LIFE_SENSOR_CONFIG: Final[dict] = {
+    48: { # MB Model 48 (DETECT Smoke/CO)
+        "name": "Days to replace",
+        "unit": UnitOfTime.DAYS,
+    },
+    46: { # MB Model 46 (DETECT Smoke Only)
+        "name": "Days to replace",
+        "unit": UnitOfTime.DAYS,
+    },
+    "default": {
+        "name": "Weeks to replace", # Default for older/non-DETECT models
+        "unit": UnitOfTime.WEEKS,
+    },
+}
+# ---------------------------------
 
 
 _TIMESTAMP_DESCRIPTIONS = (
@@ -91,8 +118,9 @@ _SENSOR_DESCRIPTIONS = (
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         suggested_display_precision=2,
     ),
+    # NOTE: This is the description for the custom KiddeSensorLifeEntity
     SensorEntityDescription(
-        key="life",
+        key=LIFE_SENSOR_KEY,
         icon="mdi:calendar-clock",
         name="Weeks to replace",
         state_class=SensorStateClass.MEASUREMENT,
@@ -227,11 +255,24 @@ async def async_setup_entry(
     coordinator: KiddeCoordinator = hass.data[DOMAIN][entry.entry_id]
     sensors: list[SensorEntity] = []
 
+    # --- FIX START: Find the entity description for 'life' once ---
+    life_description = next(
+        (
+            desc for desc in _SENSOR_DESCRIPTIONS 
+            if desc.key == LIFE_SENSOR_KEY
+        ),
+        None,
+    )
+    # --- FIX END ---
+
+
     for device_id, device_data in coordinator.data.devices.items():
+        mb_model = device_data.get(KEY_MB_MODEL)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "Checking model: [%s]",
+                "Checking model: [%s] (MB:%s)",
                 coordinator.data.devices[device_id].get(KEY_MODEL, "Unknown"),
+                mb_model,
             )
 
         for entity_description in _TIMESTAMP_DESCRIPTIONS:
@@ -242,7 +283,30 @@ async def async_setup_entry(
                     )
                 )
 
+        # -------------------------------------------------------------
+        # 1. Custom Life Sensor Entity (Must be handled first)
+        # FIX: Pass the life_description to satisfy KiddeEntity.__init__
+        if LIFE_SENSOR_KEY in device_data and life_description:
+            sensors.append(
+                KiddeSensorLifeEntity(coordinator, device_id, life_description)
+            )
+        # -------------------------------------------------------------
+
         for entity_description in _SENSOR_DESCRIPTIONS:
+            # Skip the 'life' sensor from the simple loop, as it's handled by the custom entity
+            if entity_description.key == LIFE_SENSOR_KEY:
+                continue
+
+            # --- DETECT Series Check for Voltage Sensor Exclusion ---
+            # Omit voltage sensors for DETECT MB Models 46 and 48
+            if (
+                entity_description.key in _SKIP_SIMPLE_SENSOR_KEYS and 
+                mb_model in MB_MODELS_DETECT_SERIES
+            ):
+                logger.debug(f"Skipping sensor '{entity_description.key}' because mb_model {mb_model} is DETECT series.")
+                continue
+            # --- END Check ---
+
             if entity_description.key in device_data:
                 sensors.append(
                     KiddeSensorEntity(coordinator, device_id, entity_description)
@@ -289,6 +353,37 @@ class KiddeSensorTimestampEntity(KiddeEntity, SensorEntity):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.error("Error parsing datetime '%s': %s", value, e)
             return None
+
+
+class KiddeSensorLifeEntity(KiddeEntity, SensorEntity):
+    """Custom entity for the 'life' sensor to conditionally adjust units."""
+    
+    @property
+    def entity_description(self) -> SensorEntityDescription:
+        """Return the entity description for the sensor."""
+        # Use the description passed during initialization, then override
+        base_desc = super().entity_description
+        
+        # Override name and unit with model-specific config
+        config = self._model_config
+        return base_desc.replace(
+            name=config["name"], 
+            native_unit_of_measurement=config["unit"]
+        )
+
+    @property
+    def _model_config(self) -> dict:
+        """Get the specific config (name/unit) based on the device mb_model."""
+        
+        # Use the mb_model (integer) for the lookup, falling back to "default" if not found
+        device_identifier = self.kidde_device.get(KEY_MB_MODEL, "default")
+        
+        return LIFE_SENSOR_CONFIG.get(device_identifier, LIFE_SENSOR_CONFIG["default"])
+        
+    @property
+    def native_value(self) -> float | None:
+        """Return the native value of the sensor."""
+        return self.kidde_device.get(LIFE_SENSOR_KEY)
 
 
 class KiddeSensorEntity(KiddeEntity, SensorEntity):

@@ -1,4 +1,4 @@
-"""Sensor platform for Kidde Homesafe integration."""
+"""Sensor platform for Kidde HomeSafe integration."""
 
 from __future__ import annotations
 
@@ -255,7 +255,7 @@ async def async_setup_entry(
     coordinator: KiddeCoordinator = hass.data[DOMAIN][entry.entry_id]
     sensors: list[SensorEntity] = []
 
-    # --- FIX START: Find the entity description for 'life' once ---
+    # --- Find the entity description for 'life' once ---
     life_description = next(
         (
             desc for desc in _SENSOR_DESCRIPTIONS 
@@ -263,8 +263,6 @@ async def async_setup_entry(
         ),
         None,
     )
-    # --- FIX END ---
-
 
     for device_id, device_data in coordinator.data.devices.items():
         mb_model = device_data.get(KEY_MB_MODEL)
@@ -284,8 +282,7 @@ async def async_setup_entry(
                 )
 
         # -------------------------------------------------------------
-        # 1. Custom Life Sensor Entity (Must be handled first)
-        # FIX: Pass the life_description to satisfy KiddeEntity.__init__
+        # 1. Custom Life Sensor Entity
         if LIFE_SENSOR_KEY in device_data and life_description:
             sensors.append(
                 KiddeSensorLifeEntity(coordinator, device_id, life_description)
@@ -298,7 +295,6 @@ async def async_setup_entry(
                 continue
 
             # --- DETECT Series Check for Voltage Sensor Exclusion ---
-            # Omit voltage sensors for DETECT MB Models 46 and 48
             if (
                 entity_description.key in _SKIP_SIMPLE_SENSOR_KEYS and 
                 mb_model in MB_MODELS_DETECT_SERIES
@@ -324,11 +320,7 @@ async def async_setup_entry(
 
 
 class KiddeSensorTimestampEntity(KiddeEntity, SensorEntity):
-    """A KiddeSensoryEntity which returns a datetime.
-
-    Assume sensor returns datetime string e.g. '2024-06-14T03:40:39.667544824Z'
-    or '2024-06-22T16:00:19Z' which needs to be converted to a python datetime.
-    """
+    """A KiddeSensoryEntity which returns a datetime."""
 
     @property
     def native_value(self) -> datetime.datetime | None:
@@ -358,18 +350,29 @@ class KiddeSensorTimestampEntity(KiddeEntity, SensorEntity):
 class KiddeSensorLifeEntity(KiddeEntity, SensorEntity):
     """Custom entity for the 'life' sensor to conditionally adjust units."""
     
-    @property
-    def entity_description(self) -> SensorEntityDescription:
-        """Return the entity description for the sensor."""
-        # Use the description passed during initialization, then override
-        base_desc = super().entity_description
+    # FIX: Remove the conflicting @property definition and move the dynamic logic 
+    # to the __init__ to set the attributes directly.
+    def __init__(
+        self,
+        coordinator: KiddeCoordinator,
+        device_id: int,
+        entity_description: SensorEntityDescription,
+    ) -> None:
+        """Initialize the custom life sensor."""
         
-        # Override name and unit with model-specific config
+        # 1. Call the base class __init__ FIRST. This successfully sets 
+        #    self.entity_description = entity_description (the base one).
+        super().__init__(coordinator, device_id, entity_description)
+
+        # 2. Get the model-specific configuration (Name and Unit).
         config = self._model_config
-        return base_desc.replace(
-            name=config["name"], 
-            native_unit_of_measurement=config["unit"]
-        )
+        
+        # 3. Dynamically override the entity's Name and Unit attributes 
+        #    using the Home Assistant standard pattern.
+        #    We must override _attr_name and _attr_native_unit_of_measurement
+        self._attr_native_unit_of_measurement = config["unit"]
+        self._attr_name = config["name"]
+
 
     @property
     def _model_config(self) -> dict:
@@ -405,14 +408,7 @@ class KiddeSensorEntity(KiddeEntity, SensorEntity):
 
 
 class KiddeSensorMeasurementEntity(KiddeEntity, SensorEntity):
-    """Measurement Sensor for Kidde HomeSafe.
-
-    We expect the Kidde API to report sensor output as a dictionary containing
-    a float or intenger value, a string qualitative status string, and a units
-    string. For example: "tvoc": { "value": 605.09, "status": "Moderate",
-    "Unit": "ppb"}.
-
-    """
+    """Measurement Sensor for Kidde HomeSafe."""
 
     @property
     def state_class(self) -> str:
